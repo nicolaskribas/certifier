@@ -24,9 +24,9 @@ fn main() {
 }
 
 fn generate(opts: GenerateOpts) {
-    let public_key = read_to_pubkey(&opts.pubkey);
+    let public_key = read_to_pubkey(&opts.pubkey_path);
 
-    let issuer_credentials = match opts.certificate {
+    let issuer_credentials = match opts.certificate_path {
         Some(certificate_file) => read_to_certificate(&certificate_file).issuer_credentials,
         None => None,
     };
@@ -38,7 +38,7 @@ fn generate(opts: GenerateOpts) {
         signature: None,
     };
 
-    let private_key = read_to_privkey(&opts.privkey, &opts.passphrase);
+    let private_key = read_to_privkey(&opts.privkey_path, &opts.passphrase);
 
     let signature = private_key
         .sign(&certificate.get_signable_part_as_bytes())
@@ -47,18 +47,18 @@ fn generate(opts: GenerateOpts) {
     let signature = base64::encode(signature);
     certificate.signature = Some(signature);
 
-    let mut output_file = opts.output;
+    let mut output_file = opts.output_path;
     output_file.set_extension(CERTIFICATE_EXT);
 
     create_file_and_write(&output_file, &certificate.to_toml_string().as_bytes());
 }
 
 fn sign(opts: SignOpts) {
-    let content = read_to_string(&opts.document);
+    let content = read_to_string(&opts.document_path);
 
-    let keypair = read_to_privkey(&opts.privkey, &opts.passphrase);
+    let keypair = read_to_privkey(&opts.privkey_path, &opts.passphrase);
 
-    let certificate = read_to_certificate(&opts.certificate);
+    let certificate = read_to_certificate(&opts.certificate_path);
 
     let encrypted_digest = keypair
         .sign(&content.as_bytes())
@@ -69,53 +69,67 @@ fn sign(opts: SignOpts) {
         signatory_credentials: certificate.subject_credentials,
     };
 
-    let mut detached_signature_file = opts.document.clone();
-    detached_signature_file.set_extension(DETACHED_SIGNATURE_EXT);
+    let mut detached_signature_path = opts.document_path.clone();
+    detached_signature_path.set_extension(DETACHED_SIGNATURE_EXT);
 
     create_file_and_write(
-        &detached_signature_file,
+        &detached_signature_path,
         &detached_signature.to_toml_string().as_bytes(),
     );
 }
 
 fn check(opts: CheckOpts) {
-    let content = read_to_string(&opts.document);
+    let content = read_to_string(&opts.document_path);
 
-    let mut detached_signature_file = opts.document.clone();
-    detached_signature_file.set_extension(DETACHED_SIGNATURE_EXT);
+    let mut detached_signature_path = opts.document_path.clone();
+    detached_signature_path.set_extension(DETACHED_SIGNATURE_EXT);
 
-    let detached_signature = read_to_detached_signature(&detached_signature_file);
+    let detached_signature = read_to_detached_signature(&detached_signature_path);
 
-    let certificate = find_certificate(&opts.trust, detached_signature.signatory_credentials);
+    let certificate = find_certificate(&opts.trust_path, detached_signature.signatory_credentials);
 
-    if let Some(certificate) = certificate {
-        let public_key = PublicKey::from_keystr(&certificate.public_key).unwrap();
-        let pass = public_key
-            .verify(
-                content.as_bytes(),
-                &base64::decode(detached_signature.signature).unwrap(),
-            )
-            .unwrap();
-        if pass {
-            println!("Signature verified");
-        } else {
-            println!("Signature does not match with trusted certificate found");
+    match certificate {
+        Some(certificate) => {
+            let signature = base64::decode(detached_signature.signature).unwrap_or_else(|error| {
+                panic!(
+                    "Error decoding signature {}: {}",
+                    detached_signature_path.display(),
+                    error
+                )
+            });
+
+            let public_key =
+                PublicKey::from_keystr(&certificate.public_key).unwrap_or_else(|error| {
+                    panic!("Error reading public key from found certificate: {}", error)
+                });
+
+            let pass = public_key
+                .verify(content.as_bytes(), &signature)
+                .unwrap_or_else(|error| panic!("Error validating signature: {}", error));
+
+            if pass {
+                println!("The document is authentic");
+            } else {
+                println!("The document is compromised");
+            }
         }
-    } else {
-        println!("No trusted certificate with given credentials found");
-    }
+        None => println!("No trusted certificate with given credentials found"),
+    };
 }
 
 fn find_certificate(folder: &PathBuf, credentials: String) -> Option<Certificate> {
     let paths = fs::read_dir(&folder)
-        .expect(&format!(
-            "Error opening trusted certificates location {}",
-            &folder.display()
-        ))
+        .unwrap_or_else(|error| {
+            panic!(
+                "Error opening trusted certificates location {}: {}",
+                folder.display(),
+                error
+            )
+        })
         .filter_map(|p| p.ok());
 
     let certificates_paths = paths.filter(|p| match p.path().extension() {
-        Some(extension) => extension == CERTIFICATE_EXT,
+        Some(extension) => (extension == CERTIFICATE_EXT),
         None => false,
     });
 
@@ -181,6 +195,7 @@ fn read_to_detached_signature(path: &PathBuf) -> DetachedSignature {
 fn create_file_and_write(path: &PathBuf, content: &[u8]) {
     let mut output = File::create(&path)
         .unwrap_or_else(|error| panic!("Error creating file {}: {}", path.display(), error));
+
     output
         .write(content)
         .unwrap_or_else(|error| panic!("Error writing on file {}: {}", path.display(), error));
